@@ -25,6 +25,8 @@ import requests
 import time
 import logging
 from ..event_bus import global_event_emitter
+from ..metrics.analytics import AnalyticsClient
+
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +60,7 @@ class VideoSDKHandler:
         custom_microphone_audio_track=None,
         audio_sinks=None,
         background_audio: bool = False,
+        publish_analytics_via_pubsub: bool = False,
         on_room_error: Optional[Callable[[Any], None]] = None,
         # Session management options
         auto_end_session: bool = True,
@@ -163,6 +166,10 @@ class VideoSDKHandler:
         self.auth_token = auth_token or os.getenv("VIDEOSDK_AUTH_TOKEN")
         if not self.auth_token:
             raise ValueError("VIDEOSDK_AUTH_TOKEN is not set")
+
+        self.analytics_client = AnalyticsClient()
+        if publish_analytics_via_pubsub:
+            self.analytics_client.set_room(self)   
 
         # Create meeting config as a dictionary instead of using MeetingConfig
         self.meeting_config = {

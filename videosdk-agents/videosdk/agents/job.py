@@ -45,6 +45,8 @@ class RoomOptions:
     # VideoSDK connection options
     signaling_base_url: Optional[str] = None
     background_audio: bool = False
+    publish_analytics_via_pubsub: bool = False
+
 
 
 @dataclass
@@ -272,6 +274,7 @@ class JobContext:
                         custom_microphone_audio_track=custom_microphone_audio_track,
                         audio_sinks=sinks,
                         background_audio=self.room_options.background_audio,
+                        publish_analytics_via_pubsub=self.room_options.publish_analytics_via_pubsub,
                         on_room_error=self.room_options.on_room_error,
                         auto_end_session=self.room_options.auto_end_session,
                         session_timeout_seconds=self.room_options.session_timeout_seconds,

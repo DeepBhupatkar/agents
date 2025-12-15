@@ -727,6 +727,9 @@ class Worker:
                     logger.info(
                         f"Set agent_participant_id: {room_options.agent_participant_id}"
                     )
+                if "publish_analytics_via_pubsub" in assignment.room_options:
+                    room_options.publish_analytics_via_pubsub = assignment.room_options["publish_analytics_via_pubsub"]
+                    logger.info(f"Set publish_analytics_via_pubsub: {room_options.publish_analytics_via_pubsub}")
             else:
                 logger.warning("No room_options received from assignment")
 

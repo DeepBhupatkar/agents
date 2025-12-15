@@ -290,7 +290,9 @@ class CascadingMetricsCollector:
                     'systemInstructions',
                     'llmProviderClass', 'llmModelName',
                     'sttProviderClass', 'sttModelName',
-                    'ttsProviderClass', 'ttsModelName'
+                    'ttsProviderClass', 'ttsModelName',
+                    'vadProviderClass', 'vadModelName',
+                    'eouProviderClass', 'eouModelName'
                 ]
                 for field in provider_fields:
                     if field in transformed_data:

@@ -3,6 +3,8 @@ import asyncio
 from typing import Dict, Any, Optional
 import aiohttp
 import logging
+import json
+from videosdk import PubSubPublishConfig
 
 logger = logging.getLogger(__name__)
 
@@ -12,6 +14,8 @@ class AnalyticsClient:
 
     _instance: Optional["AnalyticsClient"] = None
     _initialized: bool = False
+    _room: Optional[Any] = None
+
 
     def __new__(cls, *args, **kwargs) -> "AnalyticsClient":
         if cls._instance is None:
@@ -26,6 +30,11 @@ class AnalyticsClient:
         self.base_url = "https://api.videosdk.live"
         self._initialized = True
 
+    def set_room(self, room: Any) -> None:
+        """Set the room instance for pubsub"""
+        if room:
+            AnalyticsClient._room = room
+
     def set_session_id(self, session_id: str) -> None:
         """Set the session ID for analytics tracking"""
         self.session_id = session_id
@@ -34,6 +43,18 @@ class AnalyticsClient:
         self, interaction_data: Dict[str, Any]
     ) -> None:
         """Send turn analytics to the API endpoint"""
+        if AnalyticsClient._room:
+            try:
+                publish_config = PubSubPublishConfig(
+                    topic="CHAT",
+                    message=json.dumps(interaction_data),
+                )
+                await AnalyticsClient._room.publish_to_pubsub(publish_config)
+                logger.info("Analytics sent successfully via pubsub")
+                return
+            except Exception as e:
+                logger.error(f"Failed to send analytics via pubsub: {e}. Falling back to API.")
+
         session_id_from_payload = interaction_data.get("sessionId")
         current_session_id = self.session_id or session_id_from_payload
 
