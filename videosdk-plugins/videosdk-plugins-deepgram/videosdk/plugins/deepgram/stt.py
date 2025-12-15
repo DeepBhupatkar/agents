@@ -62,6 +62,19 @@ class DeepgramSTT(BaseSTT):
         self._ws_task: Optional[asyncio.Task] = None
         self._last_speech_event_time = 0.0
         self._previous_speech_event_time = 0.0
+   
+    async def initialize(self) -> None:
+        """
+        Pre-connect to Deepgram WebSocket to reduce initial latency.
+        This is called during pipeline pre-initialization before joining the room.
+        """
+        try:
+            logger.info("DeepgramSTT: Pre-establishing WebSocket connection")
+            await self._connect_ws()
+            self._ws_task = asyncio.create_task(self._listen_for_responses())
+            logger.info("DeepgramSTT: WebSocket connection pre-initialized successfully")
+        except Exception as e:
+            logger.warning(f"DeepgramSTT: Pre-initialization failed (non-critical): {e}")
 
     async def process_audio(
         self,

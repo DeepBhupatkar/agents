@@ -46,6 +46,16 @@ class LLM(EventEmitter[Literal["error"]]):
         """
         return self._label
 
+
+    async def initialize(self) -> None:
+        """
+        Initialize/warm up the LLM provider connection.
+        This can be called before joining a room to reduce initial latency.
+        Base implementation does nothing - subclasses can override to establish connections early.
+        """
+        pass
+    
+
     @abstractmethod
     async def chat(
         self,

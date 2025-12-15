@@ -229,6 +229,42 @@ class CascadingPipeline(Pipeline, EventEmitter[Literal["error"]]):
                 self._configure_components()
                 self.conversation_flow.tts = tts
 
+    async def pre_initialize(self) -> None:
+        """
+        Pre-initialize TTS, LLM, and STT providers to reduce initial latency.
+        This establishes connections before joining the room.
+        """
+        logger.info("Pre-initializing cascading pipeline components")
+        
+        # Pre-initialize TTS (most critical for initial message)
+        if self.tts:
+            logger.info(f"Pre-initializing TTS: {self.tts.__class__.__name__}")
+            try:
+                await self.tts.initialize()
+                logger.info("TTS pre-initialized successfully")
+            except Exception as e:
+                logger.warning(f"TTS pre-initialization failed (non-critical): {e}")
+        
+        # Pre-initialize LLM
+        if self.llm:
+            logger.info(f"Pre-initializing LLM: {self.llm.__class__.__name__}")
+            try:
+                await self.llm.initialize()
+                logger.info("LLM pre-initialized successfully")
+            except Exception as e:
+                logger.warning(f"LLM pre-initialization failed (non-critical): {e}")
+        
+        # Pre-initialize STT
+        if self.stt:
+            logger.info(f"Pre-initializing STT: {self.stt.__class__.__name__}")
+            try:
+                await self.stt.initialize()
+                logger.info("STT pre-initialized successfully")
+            except Exception as e:
+                logger.warning(f"STT pre-initialization failed (non-critical): {e}")
+        
+        logger.info("Cascading pipeline pre-initialization complete")
+
     async def start(self, **kwargs: Any) -> None:
         if self.conversation_flow:
             await self.conversation_flow.start()

@@ -58,7 +58,15 @@ class TTS(EventEmitter[Literal["error"]]):
     @property
     def can_pause(self) -> bool:
         return self.audio_track and hasattr(self.audio_track, 'can_pause') and self.audio_track.can_pause
-
+    
+    async def initialize(self) -> None:
+        """
+        Initialize/warm up the TTS provider connection.
+        This can be called before joining a room to reduce initial latency.
+        Base implementation does nothing - subclasses can override to establish connections early.
+        """
+        pass
+    
     @abstractmethod
     async def synthesize(
         self,

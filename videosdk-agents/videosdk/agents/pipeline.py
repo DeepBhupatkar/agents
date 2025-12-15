@@ -51,6 +51,16 @@ class Pipeline(EventEmitter[Literal["start"]], ABC):
         if self._wake_up_callback:
             self._wake_up_callback()
 
+    async def pre_initialize(self) -> None:
+        """
+        Pre-initialize the pipeline components before joining the room.
+        This can be used to establish connections to external services (STT, LLM, TTS)
+        to reduce initial latency. Base implementation does nothing - subclasses can override.
+        """
+        logger.info("Pipeline pre-initialization (base implementation - no action)")
+        pass
+           
+
     @abstractmethod
     async def start(self, **kwargs: Any) -> None:
         """

@@ -59,6 +59,23 @@ class CartesiaTTS(TTS):
     def reset_first_audio_tracking(self) -> None:
         """Reset the first audio tracking state for the next TTS task"""
         self._first_chunk_sent = False
+    
+
+    async def initialize(self) -> None:
+        """
+        Pre-establish WebSocket connection to Cartesia to reduce initial latency.
+        This is called during pipeline pre-initialization before joining the room.
+        """
+        try:
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.info("CartesiaTTS: Pre-establishing WebSocket connection")
+            await self._ensure_ws_connection()
+            logger.info("CartesiaTTS: WebSocket connection pre-initialized successfully")
+        except Exception as e:
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.warning(f"CartesiaTTS: Pre-initialization failed (non-critical): {e}")
 
     async def synthesize(
         self, text: AsyncIterator[str] | str, voice_id: Optional[Union[str, List[float]]] = None, **kwargs: Any,

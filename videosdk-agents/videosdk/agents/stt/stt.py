@@ -67,6 +67,16 @@ class STT(EventEmitter[Literal["error"]]):
         """Set callback for receiving STT transcripts"""
         self._transcript_callback = callback
 
+
+
+    async def initialize(self) -> None:
+        """
+        Initialize/warm up the STT provider connection.
+        This can be called before joining a room to reduce initial latency.
+        Base implementation does nothing - subclasses can override to establish connections early.
+        """
+        pass
+
     @abstractmethod
     async def process_audio(
         self,

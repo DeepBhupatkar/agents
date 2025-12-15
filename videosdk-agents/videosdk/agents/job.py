@@ -45,6 +45,8 @@ class RoomOptions:
     # VideoSDK connection options
     signaling_base_url: Optional[str] = None
     background_audio: bool = False
+    # Pipeline pre-initialization
+    pre_initialize_pipeline: bool = False
 
 
 @dataclass
@@ -230,6 +232,16 @@ class JobContext:
     async def connect(self) -> None:
         """Connect to the room"""
         if self.room_options:
+
+            # Pre-initialize pipeline if requested (before joining room to reduce latency)
+            if self.room_options.pre_initialize_pipeline and self._pipeline:
+                logger.info("Pre-initializing pipeline before joining room")
+                try:
+                    await self._pipeline.pre_initialize()
+                    logger.info("Pipeline pre-initialization complete")
+                except Exception as e:
+                    logger.warning(f"Pipeline pre-initialization failed (continuing anyway): {e}")
+            
             if not self.room_options.room_id:
                 self.room_options.room_id = self.get_room_id()
             custom_camera_video_track = None
