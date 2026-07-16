@@ -81,6 +81,7 @@ async def _execute_job_entrypoint(
     session_token = _enter_session_scope()
     if agent_id:
         from .metrics import metrics_collector
+
         metrics_collector.analytics_client.set_agent_id(agent_id)
     try:
         # Wrap in a task so the watchdog can cancel it
@@ -188,9 +189,13 @@ class WorkerOptions:
     log_level: str = "INFO"
     """Log level for SDK logging. Options: DEBUG, INFO, WARNING, ERROR. Defaults to INFO."""
 
+    termination_timeout: float = 3.0
+    """Maximum amount of time to wait for a job to terminate gracefully."""
+
     def __post_init__(self):
         """Post-initialization setup."""
         from .utils import resolve_videosdk_auth_token
+
         self.auth_token = resolve_videosdk_auth_token(self.auth_token)
 
         # Log the selected executor type
@@ -329,7 +334,8 @@ class Worker:
             loop.call_soon_threadsafe(main_future.cancel)
             # Set a timeout for graceful shutdown
             loop.call_later(
-                3.0, lambda: [task.cancel() for task in asyncio.all_tasks(loop)]
+                options.termination_timeout,
+                lambda: [task.cancel() for task in asyncio.all_tasks(loop)],
             )
 
         try:
@@ -793,10 +799,14 @@ class Worker:
                 if "recording_options" in assignment.room_options:
                     ro = assignment.room_options["recording_options"]
                     if isinstance(ro, dict):
-                        room_options.recording_options = _coerce_recording_options_dict(ro)
+                        room_options.recording_options = _coerce_recording_options_dict(
+                            ro
+                        )
                     else:
                         room_options.recording_options = ro
-                    logger.info(f"Set recording_options: {room_options.recording_options}")
+                    logger.info(
+                        f"Set recording_options: {room_options.recording_options}"
+                    )
                 if "background_audio" in assignment.room_options:
                     room_options.background_audio = assignment.room_options[
                         "background_audio"
