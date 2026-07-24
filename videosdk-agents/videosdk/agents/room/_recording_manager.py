@@ -30,7 +30,8 @@ class RecordingManager:
             "Content-Type": "application/json"
         }
         try:
-            response = requests.post(
+            response = await asyncio.to_thread(
+                requests.post,
                 START_RECORDING_URL,
                 json={"roomId": self.room_id, "participantId": participant_id},
                 headers=headers,
@@ -61,7 +62,8 @@ class RecordingManager:
             "Content-Type": "application/json"
         }
         try:
-            response = requests.post(
+            response = await asyncio.to_thread(
+                requests.post,
                 STOP_RECORDING_URL,
                 json={"roomId": self.room_id, "participantId": participant_id},
                 headers=headers,
@@ -98,7 +100,8 @@ class RecordingManager:
 
         for attempt in range(max_attempts):
             try:
-                response = requests.post(
+                response = await asyncio.to_thread(
+                    requests.post,
                     START_TRACK_RECORDING_URL,
                     json={"roomId": self.room_id, "participantId": participant_id, "kind": kind},
                     headers=headers,
@@ -154,7 +157,8 @@ class RecordingManager:
             "Content-Type": "application/json",
         }
         try:
-            response = requests.post(
+            response = await asyncio.to_thread(
+                requests.post,
                 STOP_TRACK_RECORDING_URL,
                 json={"roomId": self.room_id, "participantId": participant_id, "kind": kind},
                 headers=headers,
@@ -220,7 +224,8 @@ class RecordingManager:
                     for p_id in participants_data.keys()
                 ],
             }
-            response = requests.post(
+            response = await asyncio.to_thread(
+                requests.post,
                 MERGE_RECORDINGS_URL,
                 json=payload,
                 headers=headers,

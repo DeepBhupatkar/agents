@@ -724,9 +724,6 @@ class VideoSDKHandler(BaseTransportHandler):
 
         global_event_emitter.emit("PARTICIPANT_LEFT", {"participant": participant})
 
-
-        self._track_recordings_kinds_by_participant.pop(participant.id, None)
-
         # Update participant count and check if session should end
         self._update_non_agent_participant_count()
 
@@ -736,6 +733,8 @@ class VideoSDKHandler(BaseTransportHandler):
             )
             asyncio.create_task(self._end_session("recorded_participant_left"))
             return
+
+        self._track_recordings_kinds_by_participant.pop(participant.id, None)
 
         if self._non_agent_participant_count == 0 and self.auto_end_session:
             if (
