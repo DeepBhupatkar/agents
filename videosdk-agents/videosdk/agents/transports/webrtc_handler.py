@@ -15,6 +15,7 @@ except ImportError:
     MediaStreamTrack = object
 
 from .base import BaseTransportHandler
+from .. import audio_format
 
 logger = logging.getLogger(__name__)
 
@@ -203,6 +204,8 @@ class WebRTCTransportHandler(BaseTransportHandler):
             try:
                 frame = await track.recv()
                 audio_bytes = frame.to_ndarray().tobytes()
+                if not audio_format.is_known():
+                    audio_format.publish_from_frame(frame)
                 if self.pipeline:
                     await self.pipeline.on_audio_delta(audio_bytes)
             except Exception as e:

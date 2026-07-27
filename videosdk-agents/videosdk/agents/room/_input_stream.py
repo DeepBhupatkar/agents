@@ -3,6 +3,7 @@ import logging
 import numpy as np
 from videosdk import Stream
 from ..event_bus import global_event_emitter
+from .. import audio_format
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -30,6 +31,9 @@ class InputStreamManager:
                 if audio_data.dtype != np.int16 or not audio_data.flags.c_contiguous:
                     audio_data = np.ascontiguousarray(audio_data, dtype=np.int16)
                 pcm_frame = audio_data.tobytes()
+
+                if not audio_format.is_known():
+                    audio_format.publish_from_frame(frame)
 
                 if self.pipeline:
                     await self.pipeline.on_audio_delta(pcm_frame)

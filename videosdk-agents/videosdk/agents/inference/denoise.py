@@ -9,7 +9,9 @@ from collections import deque
 from typing import Any, Optional, Dict
 
 import aiohttp
+import numpy as np
 
+from videosdk.agents import audio_format
 from videosdk.agents.denoise import Denoise as BaseDenoise
 from videosdk.agents.utils import resolve_videosdk_auth_token
 
@@ -17,8 +19,38 @@ logger = logging.getLogger(__name__)
 
 VIDEOSDK_INFERENCE_URL = "wss://inference-gateway.videosdk.live"
 
-# Rolling window size for latency stats
 LATENCY_WINDOW = 50
+
+# Sends can outpace responses indefinitely, so cap the in-flight set.
+PENDING_CHUNK_LIMIT = 200
+
+FRAMEWORK_SAMPLE_RATE = 48000
+FRAMEWORK_CHANNELS = 2
+
+
+class _WireSpec:
+    """Audio format a provider requires.
+
+    ``channels``: what the provider needs; None to send unchanged.
+    ``rate_means``: "client" to report the rate being sent, "model" to report
+    the model's target rate instead.
+    """
+
+    __slots__ = ("channels", "rate_means", "default_model_rate")
+
+    def __init__(self, channels, rate_means, default_model_rate=None):
+        self.channels = channels
+        self.rate_means = rate_means
+        self.default_model_rate = default_model_rate
+
+
+_PROVIDER_WIRE = {
+    "aicoustics": _WireSpec(channels=1, rate_means="client"),
+    "sanas": _WireSpec(channels=2, rate_means="model", default_model_rate=16000),
+    "krisp": _WireSpec(channels=None, rate_means="client"),
+}
+
+_DEFAULT_WIRE = _WireSpec(channels=None, rate_means="client")
 
 
 class Denoise(BaseDenoise):
@@ -28,25 +60,21 @@ class Denoise(BaseDenoise):
     A lightweight noise cancellation client that connects to VideoSDK's Inference Gateway.
     Supports SANAS and AI-Coustics noise cancellation through a unified interface.
 
+    Audio is returned in the same format it was given, so the denoiser can be
+    added to or removed from a pipeline without changing anything around it.
+    Sample rate and channel count are handled automatically.
+
     Example:
-        # Using factory methods (recommended)
-        denoise = Denoise.aicoustics(model_id="sparrow-xxs-48khz")
+        denoise = Denoise.aicoustics()                    # voice-AI default
+        denoise = Denoise.sanas()
 
-        # Using generic constructor
-        denoise = Denoise(
-            provider="aicoustics",
-            model_id="sparrow-xxs-48khz",
-            config={"sample_rate": 48000}
-        )
-
-        # Use in pipeline
         pipeline = CascadingPipeline(
-            stt=DeepgramSTT(sample_rate=48000),
+            stt=DeepgramSTT(),
             llm=GoogleLLM(),
             tts=ElevenLabsTTS(),
-            vad=SileroVAD(input_sample_rate=48000),
+            vad=SileroVAD(),
             turn_detector=TurnDetector(),
-            denoise=denoise
+            denoise=denoise,
         )
     """
 
@@ -55,13 +83,15 @@ class Denoise(BaseDenoise):
         *,
         provider: str,
         model_id: str,
-        sample_rate: int = 48000,
-        channels: int = 1,
+        sample_rate: int | None = None,
+        channels: int | None = None,
         chunk_ms: int = 10,
         config: Dict[str, Any] | None = None,
         base_url: str | None = None,
         max_connection_attempts: int = 5,
         auth_token: str | None = None,
+        input_sample_rate: int | None = None,
+        input_channels: int | None = None,
     ) -> None:
         """
         Initialize the VideoSDK Inference Denoise plugin.
@@ -69,8 +99,14 @@ class Denoise(BaseDenoise):
         Args:
             provider: Denoise provider name (e.g., "aicoustics")
             model_id: Model identifier for the provider
-            sample_rate: Audio sample rate in Hz (default: 48000)
-            channels: Number of audio channels (default: 1 for mono)
+            sample_rate: Optional. Handled automatically; only set this if a
+                provider requires a specific rate.
+            channels: Deprecated and ignored.
+            input_sample_rate: Optional. Sample rate of the incoming audio.
+                Detected automatically; set only for a custom transport that
+                cannot report its own format.
+            input_channels: Optional. Channel count of the incoming audio.
+                Detected automatically, as above.
             config: Provider-specific configuration dictionary
             base_url: Custom inference gateway URL (default: production gateway)
             max_connection_attempts: After this many consecutive connection
@@ -91,11 +127,37 @@ class Denoise(BaseDenoise):
         self.provider = provider
         self.model_id = model_id
         self.sample_rate = sample_rate
-        self.channels = channels
+        self.channels = channels if channels is not None else 1
         self.chunk_ms = chunk_ms
+        self._wire = _PROVIDER_WIRE.get(provider, _DEFAULT_WIRE)
         self.config = config or {}
         self.base_url = base_url or VIDEOSDK_INFERENCE_URL
         self.max_connection_attempts: int = max(1, int(max_connection_attempts))
+
+        self._input_rate_pinned = input_sample_rate is not None
+        self._input_channels_pinned = input_channels is not None
+        self._input_format_resolved = (
+            self._input_rate_pinned and self._input_channels_pinned
+        )
+
+        self.input_sample_rate = int(
+            input_sample_rate
+            if input_sample_rate is not None
+            else FRAMEWORK_SAMPLE_RATE
+        )
+        self.input_channels = max(
+            1,
+            int(
+                input_channels
+                if input_channels is not None
+                else (self._wire.channels or FRAMEWORK_CHANNELS)
+            ),
+        )
+
+        # Denoised audio in input format, awaiting return to the pipeline.
+        self._out_buffer: bytearray = bytearray()
+
+        self._apply_wire_spec()
 
         # WebSocket state
         self._session: Optional[aiohttp.ClientSession] = None
@@ -120,7 +182,9 @@ class Denoise(BaseDenoise):
 
         # Latency tracking
         # Maps send sequence number → send timestamp (monotonic)
-        self._pending_chunks: dict[int, float] = {}
+        self._pending_chunks: deque[tuple[int, float]] = deque(
+            maxlen=PENDING_CHUNK_LIMIT
+        )
         self._send_seq: int = 0
         self._recv_seq: int = 0
 
@@ -156,9 +220,9 @@ class Denoise(BaseDenoise):
     @staticmethod
     def aicoustics(
         *,
-        model_id: str = "sparrow-xxs-48khz",
-        sample_rate: int = 48000,
-        channels: int = 1,
+        model_id: str = "quail-l-16khz",
+        sample_rate: int | None = None,
+        channels: int | None = None,
         base_url: str | None = None,
         max_connection_attempts: int = 5,
     ) -> "Denoise":
@@ -166,38 +230,31 @@ class Denoise(BaseDenoise):
         Create a Denoise instance configured for AI-Coustics.
 
         Args:
-            model_id: AI-Coustics model (default: "sparrow-xxs-48khz")
-                Sparrow family (human-to-human, 48kHz):
-                - "sparrow-xxs-48khz": Ultra-fast, 10ms latency, 1MB
-                - "sparrow-s-48khz": Small, 30ms latency, 8.96MB
-                - "sparrow-l-48khz": Large, best quality, 30ms latency, 35.1MB
+            model_id: AI-Coustics model (default: "quail-l-16khz").
 
-                Quail family (human-to-machine, voice AI, 16kHz):
-                - "quail-vf-l-16khz": Voice focus + STT optimization, 35MB
-                - "quail-l-16khz": General purpose, 35MB
-                - "quail-s-16khz": Faster, 8.88MB
+                Quail — general-purpose speech enhancement for voice AI:
+                - "quail-l-16khz": general purpose (recommended default)
+                - "quail-s-16khz": faster, smaller
+                - "quail-vf-2.2-l-16khz": voice focus, primary-speaker isolation
+                - "quail-vf-2.2-s-16khz": voice focus, faster
 
-            sample_rate: Audio sample rate in Hz
-                - Sparrow models: 48000 Hz (default)
-                - Quail models: 16000 Hz
-            channels: Number of audio channels (default: 1 for mono)
+                Rook — enhancement for human intelligibility:
+                - "rook-l-48khz" / "rook-s-48khz" (also 16khz and 8khz variants)
+
+                Legacy "sparrow-*" ids map to the default model.
+            sample_rate: Optional. Handled automatically.
+            channels: Deprecated and ignored.
             base_url: Custom inference gateway URL
 
         Returns:
             Configured Denoise instance for AI-Coustics
 
         Example:
-            >>> # Ultra-fast for real-time calls
-            >>> denoise = Denoise.aicoustics(model_id="sparrow-xxs-48khz")
+            >>> # Recommended default for voice AI
+            >>> denoise = Denoise.aicoustics()
             >>>
-            >>> # Best quality for recordings
-            >>> denoise = Denoise.aicoustics(model_id="sparrow-l-48khz")
-            >>>
-            >>> # Voice AI / STT optimization (16kHz)
-            >>> denoise = Denoise.aicoustics(
-            ...     model_id="quail-vf-l-16khz",
-            ...     sample_rate=16000
-            ... )
+            >>> # Primary-speaker isolation
+            >>> denoise = Denoise.aicoustics(model_id="quail-vf-2.2-l-16khz")
         """
 
         return Denoise(
@@ -215,8 +272,8 @@ class Denoise(BaseDenoise):
     def sanas(
         *,
         model_id: str = "VI_G_NC3.0",
-        sample_rate: int = 16000,
-        channels: int = 1,
+        sample_rate: int | None = None,
+        channels: int | None = None,
         base_url: str | None = None,
         max_connection_attempts: int = 5,
     ) -> "Denoise":
@@ -226,26 +283,17 @@ class Denoise(BaseDenoise):
         Args:
             model_id: Sanas model (default: "VI_G_NC3.0")
 
-            sample_rate: Audio sample rate in Hz
-                - VI_G_NC3.0 - 16000 for noise cancellation
-            channels: Number of audio channels (default: 1 for mono)
+            sample_rate: Optional. Handled automatically.
+            channels: Deprecated and ignored.
             base_url: Custom inference gateway URL
 
         Returns:
             Configured Denoise instance for Sanas
 
         Example:
-            >>> # Ultra-fast for real-time calls
-            >>> denoise = Denoise.aicoustics(model_id="VI_G_NC3.0")
+            >>> denoise = Denoise.sanas()
             >>>
-            >>> # Best quality for recordings
-            >>> denoise = Denoise.aicoustics(model_id="VI_G_NC3.0")
-            >>>
-            >>> # Voice AI / STT optimization (16kHz)
-            >>> denoise = Denoise.sanas(
-            ...     model_id="VI_G_NC3.0",
-            ...     sample_rate=16000
-            ... )
+            >>> denoise = Denoise.sanas(model_id="VI_G_NC3.0")
         """
 
         return Denoise(
@@ -258,6 +306,131 @@ class Denoise(BaseDenoise):
             base_url=base_url or VIDEOSDK_INFERENCE_URL,
             max_connection_attempts=max_connection_attempts,
         )
+
+    # ==================== Format Adaptation ====================
+
+    def _apply_wire_spec(self) -> None:
+        """Resolve the outgoing format from the provider's spec."""
+        wire_channels = self._wire.channels
+        self._wire_channels = (
+            self.input_channels if wire_channels is None else max(1, wire_channels)
+        )
+
+        if self._wire.rate_means == "model":
+            self._declared_sample_rate = (
+                self.sample_rate
+                if self.sample_rate is not None
+                else self._wire.default_model_rate
+            )
+            if self.input_sample_rate != FRAMEWORK_SAMPLE_RATE:
+                logger.warning(
+                    f"[InferenceDenoise] provider={self.provider} expects "
+                    f"{FRAMEWORK_SAMPLE_RATE}Hz input but the pipeline supplies "
+                    f"{self.input_sample_rate}Hz — audio may be distorted"
+                )
+        else:
+            # Must match the rate actually sent, or the provider resamples from
+            # a rate that was never used.
+            self._declared_sample_rate = self.input_sample_rate
+            if (
+                self.sample_rate is not None
+                and self.sample_rate != self.input_sample_rate
+            ):
+                logger.warning(
+                    f"[InferenceDenoise] Ignoring sample_rate="
+                    f"{self.sample_rate}; audio is sent at "
+                    f"{self.input_sample_rate}Hz and the rate is handled "
+                    f"automatically"
+                )
+
+        self.channels = self._wire_channels
+
+        if self._wire_channels != self.input_channels:
+            logger.info(
+                f"[InferenceDenoise] Channel adaptation: "
+                f"{self.input_channels}ch <-> {self._wire_channels}ch "
+                f"at {self._declared_sample_rate}Hz"
+            )
+
+    def _resolve_input_format(self) -> None:
+        """Adopt the detected input format once, on first audio.
+
+        Values supplied by the caller are never overridden.
+        """
+        if self._input_format_resolved:
+            return
+        if not audio_format.is_known():
+            return
+
+        rate, channels = audio_format.get()
+        new_rate = self.input_sample_rate if self._input_rate_pinned else rate
+        new_channels = (
+            self.input_channels if self._input_channels_pinned else channels
+        )
+        self._input_format_resolved = True
+
+        if (new_rate, new_channels) == (self.input_sample_rate, self.input_channels):
+            return
+
+        logger.info(
+            f"[InferenceDenoise] Adopting transport audio format: "
+            f"{self.input_sample_rate}Hz x{self.input_channels}ch -> "
+            f"{new_rate}Hz x{new_channels}ch"
+        )
+        self.input_sample_rate = int(new_rate)
+        self.input_channels = max(1, int(new_channels))
+        self._apply_wire_spec()
+        self._reset_format_state()
+
+    @property
+    def _channels_match(self) -> bool:
+        return self._wire_channels == self.input_channels
+
+    @property
+    def _input_frame_bytes(self) -> int:
+        return 2 * self.input_channels
+
+    @property
+    def _wire_frame_bytes(self) -> int:
+        return 2 * self._wire_channels
+
+    @property
+    def _wire_chunk_bytes(self) -> int:
+        return (self.chunk_ms * self.input_sample_rate // 1000) * self._wire_frame_bytes
+
+    @staticmethod
+    def _remix(pcm: bytes, src_channels: int, dst_channels: int) -> bytes:
+        """Convert interleaved int16 between channel counts."""
+        if src_channels == dst_channels:
+            return pcm
+        samples = np.frombuffer(pcm, dtype=np.int16)
+        if samples.size == 0:
+            return b""
+
+        if src_channels > 1:
+            usable = samples.size - (samples.size % src_channels)
+            if usable <= 0:
+                return b""
+            # int32 accumulator: averaging int16 in place would overflow.
+            frames = samples[:usable].reshape(-1, src_channels)
+            mono = frames.astype(np.int32).mean(axis=1)
+        else:
+            mono = samples.astype(np.int32)
+
+        if dst_channels > 1:
+            mono = np.repeat(mono, dst_channels)
+
+        return np.clip(mono, -32768, 32767).astype(np.int16).tobytes()
+
+    def _to_wire_format(self, pcm: bytes) -> bytes:
+        return self._remix(pcm, self.input_channels, self._wire_channels)
+
+    def _to_input_format(self, pcm: bytes) -> bytes:
+        return self._remix(pcm, self._wire_channels, self.input_channels)
+
+    def _reset_format_state(self) -> None:
+        """Drop pending output on reconnect."""
+        self._out_buffer.clear()
 
     # ==================== Latency Helpers ====================
 
@@ -354,11 +527,42 @@ class Denoise(BaseDenoise):
     # ==================== Core Denoise ====================
 
     async def denoise(self, audio_frames: bytes, **kwargs: Any) -> bytes:
+        """Denoise a chunk, returning it in the same format it was given."""
+        out = await self._denoise(audio_frames, **kwargs)
+        return self._conform_to_input(out, len(audio_frames), audio_frames)
+
+    def _conform_to_input(
+        self, out: bytes, expected_len: int, original: bytes
+    ) -> bytes:
+        """Enforce the input format on the result.
+
+        A partial frame would desync channel interleaving for the rest of the
+        session, so fall back to the original rather than emit one.
+        """
+        if len(out) == expected_len:
+            return out
+
+        frame = self._input_frame_bytes
+        if len(out) > expected_len:
+            out = out[:expected_len]
+        if len(out) % frame:
+            out = out[: len(out) - (len(out) % frame)]
+        if len(out) < expected_len:
+            logger.debug(
+                f"[InferenceDenoise] Short output ({len(out)}/{expected_len} "
+                f"bytes) — passing input through to preserve frame alignment"
+            )
+            return original
+        return out
+
+    async def _denoise(self, audio_frames: bytes, **kwargs: Any) -> bytes:
         # logger.info(f"Using Sanas secret: {self._secret}")
         # print("enter in denoise")
         if self._denoise_disabled:
             return audio_frames
         try:
+            self._resolve_input_format()
+
             if self._connect_lock is None:
                 self._connect_lock = asyncio.Lock()
 
@@ -379,12 +583,10 @@ class Denoise(BaseDenoise):
                             self._stats["errors"] = 0
                             await self._send_config()
 
-                            chunk_size = (
-                                (self.chunk_ms * self.sample_rate // 1000)
-                                * self.channels
-                                * 2
+                            chunk_size = self._wire_chunk_bytes
+                            self._send_buffer.extend(
+                                self._to_wire_format(audio_frames)
                             )
-                            self._send_buffer.extend(audio_frames)
                             if len(self._send_buffer) >= chunk_size:
                                 first_chunk = bytes(self._send_buffer[:chunk_size])
                                 del self._send_buffer[:chunk_size]
@@ -408,8 +610,8 @@ class Denoise(BaseDenoise):
             if not self._config_sent:
                 return audio_frames
 
-            chunk_size = (self.chunk_ms * self.sample_rate // 1000) * self.channels * 2
-            self._send_buffer.extend(audio_frames)
+            chunk_size = self._wire_chunk_bytes
+            self._send_buffer.extend(self._to_wire_format(audio_frames))
 
             while len(self._send_buffer) >= chunk_size:
                 chunk = bytes(self._send_buffer[:chunk_size])
@@ -423,6 +625,7 @@ class Denoise(BaseDenoise):
                     self._config_sent = False
                     self._send_buffer.clear()
                     self._reset_latency_state()
+                    self._reset_format_state()
                     return audio_frames
 
             denoised_chunks = []
@@ -434,27 +637,25 @@ class Denoise(BaseDenoise):
 
             if denoised_chunks:
                 all_denoised = b"".join(denoised_chunks)
-                total = len(all_denoised)
                 self._stats["chunks_received"] += len(denoised_chunks)
-                self._stats["bytes_received"] += total
+                self._stats["bytes_received"] += len(all_denoised)
+                self._out_buffer.extend(self._to_input_format(all_denoised))
 
-                if total > frame_size:
-                    excess = all_denoised[frame_size:]
-                    for i in range(0, len(excess), frame_size):
-                        piece = excess[i : i + frame_size]
-                        if self._audio_buffer.full():
-                            try:
-                                self._audio_buffer.get_nowait()
-                                self._stats["buffer_drops"] += 1
-                            except asyncio.QueueEmpty:
-                                pass
-                        try:
-                            self._audio_buffer.put_nowait(piece)
-                        except asyncio.QueueFull:
-                            pass
-                    return all_denoised[:frame_size]
+                # Drop stale audio rather than accumulate latency.
+                max_backlog = frame_size * 20
+                if len(self._out_buffer) > max_backlog:
+                    dropped = len(self._out_buffer) - max_backlog
+                    del self._out_buffer[:dropped]
+                    self._stats["buffer_drops"] += 1
+                    logger.warning(
+                        f"[InferenceDenoise] Output backlog exceeded "
+                        f"{max_backlog} bytes — dropped {dropped} bytes"
+                    )
 
-                return all_denoised
+            if len(self._out_buffer) >= frame_size:
+                out = bytes(self._out_buffer[:frame_size])
+                del self._out_buffer[:frame_size]
+                return out
 
             return audio_frames
 
@@ -498,6 +699,7 @@ class Denoise(BaseDenoise):
             self._config_sent = False
             self._send_buffer.clear()
             self._reset_latency_state()
+            self._reset_format_state()
             logger.info("[InferenceDenoise] Connected successfully")
 
         except Exception as e:
@@ -513,8 +715,8 @@ class Denoise(BaseDenoise):
             "type": "config",
             "data": {
                 "model": self.model_id,
-                "sample_rate": self.sample_rate,
-                "channels": self.channels,
+                "sample_rate": self._declared_sample_rate,
+                "channels": self._wire_channels,
                 **self.config,
             },
         }
@@ -522,7 +724,9 @@ class Denoise(BaseDenoise):
         self._config_sent = True
         logger.info(
             f"[InferenceDenoise] Config sent: "
-            f"model={self.model_id}, sample_rate={self.sample_rate}Hz, channels={self.channels}"
+            f"model={self.model_id}, "
+            f"sample_rate={self._declared_sample_rate}Hz, "
+            f"channels={self._wire_channels}"
         )
 
     async def _send_audio(self, audio_bytes: bytes) -> None:
@@ -534,7 +738,7 @@ class Denoise(BaseDenoise):
         self._send_seq += 1
 
         # Record send timestamp BEFORE the await so network time is included
-        self._pending_chunks[seq] = time.monotonic()
+        self._pending_chunks.append((seq, time.monotonic()))
 
         await self._ws.send_str(
             json.dumps(
@@ -552,22 +756,33 @@ class Denoise(BaseDenoise):
         """
         Match a received chunk to a sent chunk and record the round-trip latency.
 
-        If the server echoes 'seq', we match exactly.
-        Otherwise we consume the oldest pending timestamp (FIFO approximation).
+        If the server echoes 'seq' we match it exactly; otherwise the oldest
+        pending timestamp is consumed (FIFO approximation).
+
+        Sequence numbers only increase, so a bounded deque keeps this O(1) and
+        caps the in-flight set when sends outpace responses.
         """
         now = time.monotonic()
+        pending = self._pending_chunks
+        if not pending:
+            return
 
-        if recv_seq is not None and recv_seq in self._pending_chunks:
-            sent_at = self._pending_chunks.pop(recv_seq)
-        elif self._pending_chunks:
-            # FIFO: oldest sent chunk corresponds to oldest received chunk
-            oldest_seq = min(self._pending_chunks)
-            sent_at = self._pending_chunks.pop(oldest_seq)
+        if recv_seq is None:
+            sent_at = pending.popleft()[1]
         else:
-            return  # no pending chunk to match
+            sent_at = None
+            while pending:
+                seq, ts = pending[0]
+                if seq > recv_seq:
+                    return
+                pending.popleft()
+                if seq == recv_seq:
+                    sent_at = ts
+                    break
+            if sent_at is None:
+                return
 
-        latency_ms = (now - sent_at) * 1000
-        self._record_latency(latency_ms)
+        self._record_latency((now - sent_at) * 1000)
 
     async def _listen_for_responses(self) -> None:
         """Background task to listen for WebSocket responses from the server."""
@@ -740,8 +955,10 @@ class Denoise(BaseDenoise):
             "pending_chunks": len(self._pending_chunks),
             "provider": self.provider,
             "model": self.model_id,
-            "sample_rate": self.sample_rate,
-            "channels": self.channels,
+            "sample_rate": self._declared_sample_rate,
+            "channels": self._wire_channels,
+            "input_sample_rate": self.input_sample_rate,
+            "input_channels": self.input_channels,
             "connected": self._ws is not None and not self._ws.closed,
         }
 
