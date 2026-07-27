@@ -9,6 +9,8 @@ override-dependencies = [
     "sphinx-rtd-theme ; sys_platform == 'never'",
 ]
 
+environments = ["python_full_version < '3.14'"]
+
 [tool.uv.workspace]
 members = [
     "videosdk-agents",
