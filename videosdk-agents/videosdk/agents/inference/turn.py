@@ -15,8 +15,8 @@ loaded locally; the server handles downloads, caching, and inference.
 into one of four turn states (Complete / Incomplete / Backchannel / Wait),
 enabling backchannel suppression and explicit "wait/stop" handling. Two sizes:
 
-  * ``TurnV2.echo_small()`` — faster (default).
-  * ``TurnV2.echo_large()`` — higher accuracy.
+  * ``TurnV2.echo_large()`` — higher accuracy (default).
+  * ``TurnV2.echo_small()`` — faster.
 
 Example:
     from videosdk.inference import Turn, TurnV2
@@ -450,8 +450,8 @@ class TurnV2(EOU):
     ``echo_large()`` factory methods.
 
     Args:
-        model_id: ``"echo-small"`` (default, faster) or ``"echo-large"``
-            (higher accuracy).
+        model_id: ``"echo-large"`` (default, higher accuracy) or
+            ``"echo-small"`` (faster).
         host: ``host:port`` of the turn server. Falls back to the
             ``VIDEOSDK_TURN_GRPC_HOST`` env var, then to
             ``inference-gateway.videosdk.live:50053``.
@@ -467,7 +467,7 @@ class TurnV2(EOU):
     def __init__(
         self,
         *,
-        model_id: str = "echo-small",
+        model_id: str = "echo-large",
         host: Optional[str] = None,
         timeout: float = DEFAULT_GRPC_TIMEOUT_SECONDS,
         token: Optional[str] = None,
