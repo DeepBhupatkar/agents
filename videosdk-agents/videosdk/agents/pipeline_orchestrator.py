@@ -1267,9 +1267,9 @@ class PipelineOrchestrator(EventEmitter[Literal[
         if truncated_response and metrics_collector.current_turn:
             if not metrics_collector.current_turn.agent_speech:
                 metrics_collector.set_agent_response(truncated_response)
-            else:
+            elif not metrics_collector.agent_final_transport_emitted:
                 metrics_collector.emit_agent_transcript_transport(
-                    metrics_collector.current_turn.agent_speech, type="final"
+                    truncated_response, type="final"
                 )
 
         if truncated_response and self.agent:

@@ -69,6 +69,7 @@ class MetricsCollector:
         # Speech state tracking
         self._is_agent_speaking: bool = False
         self._is_user_speaking: bool = False
+        self.agent_final_transport_emitted: bool = False
         self._user_input_start_time: Optional[float] = None
         self._user_speech_end_time: Optional[float] = None
         self._agent_speech_start_time: Optional[float] = None
@@ -147,6 +148,7 @@ class MetricsCollector:
 
         self._is_agent_speaking = False
         self._is_user_speaking = False
+        self.agent_final_transport_emitted = False
         self._user_input_start_time = None
         self._user_speech_end_time = None
         self._agent_speech_start_time = None
@@ -302,6 +304,7 @@ class MetricsCollector:
             self.complete_turn()
 
         self._total_turns += 1
+        self.agent_final_transport_emitted = False
         self.current_turn = TurnMetrics(turn_id=self._generate_turn_id(), preemtive_generation_enabled=self.preemtive_generation_enabled)
 
         # Carry over pending user start time from a previously discarded turn
@@ -976,6 +979,8 @@ class MetricsCollector:
         """
         if not text or not str(text).strip():
             return
+        if type == "final":
+            self.agent_final_transport_emitted = True
         global_event_emitter.emit(
             "AGENT_TRANSCRIPT_ADDED",
             {"text": str(text).strip(), "type": type},
@@ -1035,6 +1040,7 @@ class MetricsCollector:
         self.current_turn.agent_speech = response
         logger.info(f"agent output speech: {response}")
         if emit_transport:
+            self.agent_final_transport_emitted = True
             global_event_emitter.emit("AGENT_TRANSCRIPT_ADDED", {"text": response, "type": "final"})
 
         if not any(ev.event_type == "agent_speech" for ev in self.current_turn.timeline_event_metrics):
